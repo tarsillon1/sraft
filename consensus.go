@@ -2,7 +2,6 @@ package sraft
 
 import (
 	"math"
-	"sync"
 )
 
 // isMajority checks if a integer is greater than half another integer.
@@ -15,14 +14,12 @@ type consensusMan struct {
 	index float64
 	count int
 	cache []bool
-	mut   *sync.Mutex
 }
 
 // newConsensusMan creates a new consensus manager.
 func newConsensusMan(peerLen int) *consensusMan {
 	return &consensusMan{
 		count: 1,
-		mut:   &sync.Mutex{},
 		index: math.Inf(1),
 		cache: make([]bool, peerLen),
 	}
@@ -37,9 +34,6 @@ func newConsensusMan(peerLen int) *consensusMan {
 // This function returns -1 is a consensus has not yet been reached.
 // Otherwise, it returns a value greater than 0 that represents the commit index in which followers have reached a consensus on.
 func (c *consensusMan) check(peerIndex, commitIndex int) int {
-	c.mut.Lock()
-	defer c.mut.Unlock()
-
 	fCommitIndex := float64(commitIndex)
 	if c.index > fCommitIndex {
 		c.index = fCommitIndex

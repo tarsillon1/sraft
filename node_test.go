@@ -37,10 +37,6 @@ func createNodes(l int) []*node {
 
 	for x := 0; x < l; x++ {
 		for y := x + 1; y < l; y++ {
-			if x == y {
-				continue
-			}
-
 			peerX := newPeer()
 			peerY := newPeer()
 			nodeConfigs[x].peers = append(nodeConfigs[x].peers, peerX)
@@ -67,6 +63,15 @@ func stopAll(nodes []*node) {
 	for _, node := range nodes {
 		node.stop()
 	}
+}
+
+func getLeader(nodes []*node) *node {
+	for _, node := range nodes {
+		if node.state == Leader {
+			return node
+		}
+	}
+	return nil
 }
 
 func getLeaderOrFail(t *testing.T, nodes []*node) *node {
@@ -143,7 +148,7 @@ func TestAppendLog(t *testing.T) {
 	leader := getLeaderOrFail(t, nodes)
 
 	log1 := []byte("hello world")
-	leader.appendLog(log1)
+	leader.appendEntries(log1)
 
 	time.Sleep(time.Second)
 
@@ -151,13 +156,13 @@ func TestAppendLog(t *testing.T) {
 	checkLogAtIndex(t, nodes, 0, log1)
 
 	log2 := []byte("hello world 1")
-	leader.appendLog(log2)
+	leader.appendEntries(log2)
 
 	log3 := []byte("hello world 2")
-	leader.appendLog([]byte(log3))
+	leader.appendEntries([]byte(log3))
 
-	log4 := []byte("hello world 4")
-	leader.appendLog(log4)
+	log4 := []byte("hello world 3")
+	leader.appendEntries(log4)
 
 	time.Sleep(time.Second)
 
@@ -167,4 +172,45 @@ func TestAppendLog(t *testing.T) {
 	checkLogAtIndex(t, nodes, 3, log4)
 
 	stopAll(nodes)
+}
+
+type benchmarkLog struct {
+	*CommitInMemory
+	benchmark chan int
+}
+
+func (b *benchmarkLog) Append(e ...[]byte) {
+	b.CommitInMemory.Append(e...)
+	b.benchmark <- len(e)
+}
+
+func newBenchamarkLog() *benchmarkLog {
+	commitInMemory := NewCommitInMemory()
+	return &benchmarkLog{
+		benchmark:      make(chan int),
+		CommitInMemory: commitInMemory,
+	}
+}
+
+func BenchmarkConsensus(b *testing.B) {
+	b.StopTimer()
+
+	log := newBenchamarkLog()
+
+	nodes := createNodes(5)
+	startAll(nodes)
+
+	time.Sleep(time.Second)
+
+	leader := getLeader(nodes)
+	leader.log = log
+
+	b.StartTimer()
+
+	entry := []byte("hello world")
+	for n := 0; n < b.N; n++ {
+		leader.appendEntries(entry)
+
+		<-log.benchmark
+	}
 }
