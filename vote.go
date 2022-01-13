@@ -1,5 +1,5 @@
 package sraft
 
 type vote struct {
-	term *uint64
+	term uint64
 }

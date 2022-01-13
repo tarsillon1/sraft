@@ -32,15 +32,14 @@ func newPeer() *peer {
 
 // follower is a helper struct used by a leader for caching information regarding a follower.
 type follower struct {
-	lastMatchIndex          int  // The last received match index for the follower.
-	hasRespondedToHeartbeat bool // True if the follower has responded to the last heartbeat sent from the leader.
-	heartbeatDeadline       int64
+	matchIndex              int         // The last received match index for the follower.
+	hasRespondedToHeartbeat bool        // True if the follower has responded to the last heartbeat sent from the leader.
+	heartbeatTimeout        *time.Timer // Timer for tracking when heartbeats should be sent to follower.
 }
 
 func newFollower() *follower {
-	return &follower{lastMatchIndex: -1, hasRespondedToHeartbeat: true, heartbeatDeadline: time.Now().Add(heartbeatTimeoutDur).UnixMilli()}
-}
-
-func (f *follower) nextHearbeatDeadline() {
-	f.heartbeatDeadline = time.Now().Add(heartbeatTimeoutDur).UnixMilli()
+	return &follower{
+		matchIndex:              -1,
+		hasRespondedToHeartbeat: true,
+	}
 }

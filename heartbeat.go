@@ -3,6 +3,7 @@ package sraft
 import "encoding/binary"
 
 type heartbeat struct {
+	success     bool
 	commitIndex uint64   // The index of the highest log entry known to be committed.
 	matchIndex  uint64   // The index of the highest log entry known to be replicated.
 	prevIndex   uint64   // The index that the entries should be appended after.

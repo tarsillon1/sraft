@@ -1,6 +1,7 @@
 package sraft
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -13,14 +14,8 @@ func TestNewNode(t *testing.T) {
 		log:    NewCommitInMemory(),
 	})
 
-	loopCloseChan := make(chan bool)
-	go func() {
-		n.start()
-		close(loopCloseChan)
-	}()
-
+	n.start()
 	n.stop()
-	<-loopCloseChan
 }
 
 func createNodes(l int) []*node {
@@ -74,7 +69,7 @@ func getLeader(nodes []*node) *node {
 	return nil
 }
 
-func getLeaderOrFail(t *testing.T, nodes []*node) *node {
+func getLeaderOrFail(t testing.TB, nodes []*node) *node {
 	var leader *node
 	leaderCount := 0
 	for _, node := range nodes {
@@ -95,7 +90,13 @@ func checkLogLength(t *testing.T, nodes []*node, expectedLen int) {
 	for _, node := range nodes {
 		l := node.log.Length()
 		if l != expectedLen {
-			t.Fatalf("wrong log length: expected %d, got %d", expectedLen, l)
+			state := "follower"
+			if node.state == Leader {
+				state = "leader"
+			} else if node.state == Candidate {
+				state = "candidate"
+			}
+			t.Fatalf("wrong log length for %s: expected %d, got %d", state, expectedLen, l)
 		}
 	}
 }
@@ -159,7 +160,7 @@ func TestAppendLog(t *testing.T) {
 	leader.appendEntries(log2)
 
 	log3 := []byte("hello world 2")
-	leader.appendEntries([]byte(log3))
+	leader.appendEntries(log3)
 
 	log4 := []byte("hello world 3")
 	leader.appendEntries(log4)
@@ -176,18 +177,24 @@ func TestAppendLog(t *testing.T) {
 
 type benchmarkLog struct {
 	*CommitInMemory
-	benchmark chan int
+	done chan bool
+	b    *testing.B
 }
 
 func (b *benchmarkLog) Append(e ...[]byte) {
 	b.CommitInMemory.Append(e...)
-	b.benchmark <- len(e)
+
+	l := b.CommitInMemory.Length()
+	if l == b.b.N {
+		close(b.done)
+	}
 }
 
-func newBenchamarkLog() *benchmarkLog {
+func newBenchamarkLog(b *testing.B) *benchmarkLog {
 	commitInMemory := NewCommitInMemory()
 	return &benchmarkLog{
-		benchmark:      make(chan int),
+		b:              b,
+		done:           make(chan bool),
 		CommitInMemory: commitInMemory,
 	}
 }
@@ -195,22 +202,37 @@ func newBenchamarkLog() *benchmarkLog {
 func BenchmarkConsensus(b *testing.B) {
 	b.StopTimer()
 
-	log := newBenchamarkLog()
-
 	nodes := createNodes(5)
 	startAll(nodes)
 
 	time.Sleep(time.Second)
 
-	leader := getLeader(nodes)
+	leader := getLeaderOrFail(b, nodes)
+	log := newBenchamarkLog(b)
 	leader.log = log
 
 	b.StartTimer()
 
-	entry := []byte("hello world")
-	for n := 0; n < b.N; n++ {
-		leader.appendEntries(entry)
+	go func() {
+		for n := 0; n < b.N; n++ {
+			entry := []byte(fmt.Sprintf("%d", n))
+			leader.appendEntries(entry)
+		}
+	}()
 
-		<-log.benchmark
+	<-log.done
+
+	b.StopTimer()
+
+	time.Sleep(time.Second)
+
+	for n := 0; n < b.N; n++ {
+		for _, node := range nodes {
+			if string(node.log.Get(n)) != fmt.Sprintf("%d", n) {
+				b.Fatalf("log is not in correct order")
+			}
+		}
 	}
+
+	stopAll(nodes)
 }
