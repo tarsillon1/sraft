@@ -1,6 +1,7 @@
 package sraft
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -13,23 +14,23 @@ type nodeConfig struct {
 }
 
 type node struct {
-	id                 int
-	matchIndex         int
-	lastTermMatchIndex int
-	term               uint64
-	vote               uint64
-	peers              []*peer
-	followers          []*follower
-	commit             Commit
-	log                Log // Manages all log entries that have been committed
-	state              State
-	isStarted          bool
-	electionTimeout    *time.Timer
-	commitMut          *sync.Mutex
-	termMut            *sync.Mutex
-	errCh              chan error
-	stopCh             chan bool
-	stopWG             *sync.WaitGroup
+	id              int
+	matchIndex      int
+	rollback        bool
+	term            uint64
+	vote            uint64
+	peers           []*peer
+	followers       []*follower
+	commit          Commit
+	log             Log // Manages all log entries that have been committed
+	state           State
+	isStarted       bool
+	electionTimeout *time.Timer
+	commitMut       *sync.Mutex
+	termMut         *sync.Mutex
+	errCh           chan error
+	stopCh          chan bool
+	stopWG          *sync.WaitGroup
 }
 
 func newNode(config *nodeConfig) *node {
@@ -123,11 +124,11 @@ func (n *node) acceptVote(vote *vote) error {
 	defer n.termMut.Unlock()
 
 	if vote.term < n.term {
-		return errStaleTerm
+		return fmt.Errorf("failed to accept vote: %w", errStaleTerm)
 	}
 
 	if n.state != Candidate {
-		return errNotCandidate
+		return fmt.Errorf("failed to accept vote: %w", errNotCandidate)
 	}
 
 	n.vote++
@@ -139,7 +140,7 @@ func (n *node) acceptVote(vote *vote) error {
 
 		commitIndex := n.commit.Length()
 		for peerIndex, follower := range n.followers {
-			follower.matchIndex = commitIndex
+			follower.nextIndex = commitIndex
 			n.sendHeartbeatToFollower(peerIndex, -1)
 		}
 	} else {
@@ -160,7 +161,7 @@ func (n *node) voteForCandidate(peerIndex int, election *election) error {
 	defer n.termMut.Unlock()
 
 	if n.term >= election.term {
-		return errStaleTerm
+		return fmt.Errorf("failed to vote for candidate: %w", errStaleTerm)
 	}
 
 	if n.state == Leader {
@@ -168,7 +169,7 @@ func (n *node) voteForCandidate(peerIndex int, election *election) error {
 	}
 
 	n.state = Follower
-	n.lastTermMatchIndex = n.matchIndex
+	n.rollback = true
 
 	newTerm := election.term
 	n.term = newTerm
@@ -307,8 +308,8 @@ func (n *node) handleHeartbeatFromFollower(peerIndex int, hb *heartbeat) error {
 	follower.hasRespondedToHeartbeat = true
 
 	followerMatchIndex := int(hb.matchIndex)
-	if hb.success || followerMatchIndex < follower.matchIndex {
-		follower.matchIndex = followerMatchIndex
+	if hb.success || followerMatchIndex < follower.nextIndex {
+		follower.nextIndex = followerMatchIndex
 	}
 
 	if followerMatchIndex < n.matchIndex {
@@ -333,7 +334,7 @@ func (n *node) handleHeartbeatFromFollower(peerIndex int, hb *heartbeat) error {
 		indexes := make([]int, len(n.followers)+1)
 		indexes[0] = n.matchIndex
 		for i := 0; i < len(n.followers); i++ {
-			indexes[i+1] = n.followers[i].matchIndex
+			indexes[i+1] = n.followers[i].nextIndex
 		}
 
 		consensusIndex := getConsensusIndex(indexes)
@@ -357,7 +358,7 @@ func (n *node) handleHeartbeatFromLeader(peerIndex int, hb *heartbeat) error {
 	defer n.termMut.Unlock()
 
 	if hb.term < n.term {
-		return errStaleTerm
+		return fmt.Errorf("failed to handle heartbeat from leader: %w", errStaleTerm)
 	}
 	if n.state == Leader {
 		return errIsLeader
@@ -365,31 +366,23 @@ func (n *node) handleHeartbeatFromLeader(peerIndex int, hb *heartbeat) error {
 
 	n.resetElectionTimeout()
 
+	prevIndex := int(hb.prevIndex)
+
+	entriesLen := len(hb.entries)
+	if entriesLen != 0 && n.rollback {
+		n.rollback = false
+		n.clearCommit()
+	}
+
 	n.commitMut.Lock()
 	defer n.commitMut.Unlock()
 
 	success := false
 	commitIndex := n.log.Length()
 	uncommittedIndex := n.commit.Length()
-
-	prevIndex := int(hb.prevIndex)
-	entriesLen := len(hb.entries)
 	followerMatchIndex := commitIndex + uncommittedIndex
-	if entriesLen != 0 {
-		if n.lastTermMatchIndex > prevIndex {
-			shiftIndex := n.lastTermMatchIndex - prevIndex
-			if shiftIndex >= 0 {
-				if uncommittedIndex < shiftIndex {
-					shiftIndex = uncommittedIndex
-				}
-				if shiftIndex != 0 {
-					n.commit.Shift(shiftIndex)
-					followerMatchIndex -= shiftIndex
-					uncommittedIndex -= shiftIndex
-				}
-			}
-		}
 
+	if entriesLen != 0 {
 		startIndex := followerMatchIndex - prevIndex
 		if startIndex >= 0 {
 			newEntries := hb.entries[startIndex:]
@@ -433,7 +426,7 @@ func (n *node) handleHeartbeat(peerIndex int, hb *heartbeat) error {
 	n.termMut.Lock()
 
 	if hb.term < n.term {
-		return errStaleTerm
+		return fmt.Errorf("failed to handle heartbeat: %w", errStaleTerm)
 	}
 
 	if hb.term > n.term {
@@ -443,7 +436,7 @@ func (n *node) handleHeartbeat(peerIndex int, hb *heartbeat) error {
 			n.resetElectionTimeout()
 		}
 		n.state = Follower
-		n.lastTermMatchIndex = n.matchIndex
+		n.rollback = true
 	}
 
 	n.termMut.Unlock()
@@ -472,7 +465,7 @@ func (n *node) appendEntries(entry []byte) error {
 	for i := 0; i < len(n.followers); i++ {
 		follower := n.followers[i]
 		if follower.hasRespondedToHeartbeat {
-			err := n.sendHeartbeatToFollower(i, follower.matchIndex)
+			err := n.sendHeartbeatToFollower(i, follower.nextIndex)
 			if err != nil {
 				return err
 			}
@@ -508,6 +501,7 @@ func (n *node) start() <-chan error {
 					break
 				}
 				if err != nil {
+					fmt.Println(err)
 					n.errCh <- err
 					err = nil
 				}
@@ -534,5 +528,5 @@ func (n *node) stop() {
 
 	n.clearCommit()
 	n.state = Follower
-	n.lastTermMatchIndex = 0
+	n.rollback = false
 }
